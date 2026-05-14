@@ -11,9 +11,9 @@ from langchain_core.prompts import PromptTemplate
 from langchain_community.retrievers import BM25Retriever
 from langchain_classic.memory import ConversationBufferMemory
 from langchain_classic.retrievers import EnsembleRetriever
-st.set_page_config(page_title="Knowledge Search System",layout="wide")
+st.set_page_config(page_title="Hybrid RAG System",layout="wide")
 st.title("Hybrid RAG")
-st.sidebar.title("Upload Knowledge Files")
+st.sidebar.title("Upload document Files")
 st.sidebar.write("Supported Formats:")
 st.sidebar.write("PDF | TXT | CSV | DOCX")
 if "messages" not in st.session_state:
@@ -82,14 +82,11 @@ def process_documents(uploaded_files):
     faiss_retriever = vectorstore.as_retriever(
         search_kwargs={"k": 4}
     )
-    bm25_retriever = BM25Retriever.from_documents(
-        split_docs
+    bm25_retriever = BM25Retriever.from_documents(split_docs
     )
     bm25_retriever.k = 4
     ensemble_retriever = EnsembleRetriever(
-        retrievers=[
-            faiss_retriever,
-            bm25_retriever
+        retrievers=[faiss_retriever,bm25_retriever
         ],
         weights=[0.7, 0.3]
     )
