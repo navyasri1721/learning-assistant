@@ -66,8 +66,8 @@ def process_documents(uploaded_files):
         all_docs.extend(documents)
         os.remove(temp_path)
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
+        chunk_size=1500,
+        chunk_overlap=300
     )
     split_docs = text_splitter.split_documents(all_docs)
     class CustomHFEmbeddings(Embeddings):
@@ -107,10 +107,43 @@ user_question = st.chat_input(
     "Ask questions from your uploaded documents..."
 )
 if user_question:
+    prompt_template = """
+You are a helpful AI assistant with two abilities:
+
+1. GENERAL CHAT MODE:
+If the user is greeting (hello, hi, how are you) or asking casual questions,
+respond normally in a friendly and natural way. No need to use context.
+
+2. DOCUMENT Q&A MODE:
+If the question is related to uploaded documents, answer ONLY using the provided context.
+
+RULES FOR DOCUMENT MODE:
+- Give detailed explanations (not short answers)
+- Expand concepts clearly and step-by-step when needed
+- Add examples ONLY if supported by context
+- Do NOT use outside knowledge
+- Do NOT invent information
+- If the answer is not present in context, say:
+  "I could not find this information in the uploaded documents."
+
+---
+
+Context:
+{context}
+
+Chat History:
+{chat_history}
+
+Question:
+{question}
+
+Answer:
+"""
     st.session_state.messages.append({
         "role": "user",
         "content": user_question
     })
+
     with st.chat_message("user"):
         st.markdown(user_question)
     with st.chat_message("assistant"):
@@ -118,76 +151,50 @@ if user_question:
             st.warning("Please upload documents first.")
         else:
             with st.spinner("Thinking..."):
-                docs = st.session_state.retriever.invoke(
-                    user_question
-                )
-                context = "\n\n".join([
-                    doc.page_content
-                    for doc in docs
-                ])
-                prompt_template = """
-You are an AI Knowledge Search Assistant.
-Answer ONLY from the provided context.
-Rules:
-- Give clear explanations
-- Give detailed answers
-- Mention important points
-- Include source references
-- If answer is unavailable, say:
-"I could not find this information in the uploaded documents."
-Chat History:
-{chat_history}
-Context:
-{context}
-Question:
-{question}
-Answer:
-"""
-                prompt = PromptTemplate(
-                    template=prompt_template,
-                    input_variables=[
-                        "chat_history",
-                        "context",
-                        "question"
-                    ]
-                )
-                final_prompt = prompt.format(
-                   chat_history=str(st.session_state.memory.buffer),
-                    context=context,
-                    question=user_question
-                )
-                response = llm.invoke(final_prompt)
-                answer = response.content
-                st.session_state.memory.save_context(
-                    {"input": user_question},
-                    {"output": answer}
-                )
-                confidence = len(docs)
-                st.markdown("### Confidence Score")
-                if confidence >= 5:
-                    st.success("High Confidence Answer")
-                elif confidence >= 3:
-                    st.warning("Medium Confidence Answer")
-                else:
-                    st.error("Low Confidence Answer")
-                st.markdown("### Sources")
-                shown_sources = set()
-                for doc in docs:
-                    source = doc.metadata.get(
-                        "source",
-                        "Unknown File"
-                    )
-                    page = doc.metadata.get(
-                        "page",
-                        "N/A"
-                    )
-                    if isinstance(page, int):
-                        page = page + 1
-                    source_text = f"{source} — Page {page}"
-                    if source_text not in shown_sources:
-                        st.markdown(f"- {source_text}")
-                        shown_sources.add(source_text)
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": answer
-                })
+                docs = st.session_state.retriever.invoke(user_question)
+
+            context = "\n\n".join([doc.page_content for doc in docs])
+
+            prompt = PromptTemplate(
+                template=prompt_template,
+                input_variables=["chat_history", "context", "question"]
+            )
+
+            final_prompt = prompt.format(
+                chat_history=str(st.session_state.memory.buffer),
+                context=context,
+                question=user_question
+            )
+
+            response = llm.invoke(final_prompt)
+            answer = response.content
+
+            # ✅ SAVE MEMORY
+            st.session_state.memory.save_context(
+                {"input": user_question},
+                {"output": answer}
+            )
+
+            # ⭐⭐⭐ THIS IS THE MISSING PART (IMPORTANT FIX)
+            st.markdown("### Answer")
+            st.write(answer)
+
+            # Sources
+            st.markdown("### Sources")
+            shown_sources = set()
+            for doc in docs:
+                source = doc.metadata.get("source", "Unknown File")
+                page = doc.metadata.get("page", "N/A")
+                if isinstance(page, int):
+                    page = page + 1
+
+                source_text = f"{source} — Page {page}"
+                if source_text not in shown_sources:
+                    st.markdown(f"- {source_text}")
+                    shown_sources.add(source_text)
+
+            # Save chat
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer
+            })
