@@ -1,62 +1,113 @@
 import streamlit as st
-from langchain_groq import ChatGroq
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_core.prompts import PromptTemplate
 import tempfile
 import os
-st.set_page_config(
-    page_title="AI Personal Learning Assistant",
-    layout="wide"
-)
-st.title(" AI Personal Learning Assistant")
+from langchain_groq import ChatGroq
+from langchain_community.document_loaders import (PyPDFLoader,TextLoader,CSVLoader,Docx2txtLoader)
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from sentence_transformers import SentenceTransformer
+from langchain_core.embeddings import Embeddings
+from langchain_core.prompts import PromptTemplate
+from langchain_community.retrievers import BM25Retriever
+from langchain_classic.memory import ConversationBufferMemory
+from langchain_classic.retrievers import EnsembleRetriever
+st.set_page_config(page_title="Knowledge Search System",layout="wide")
+st.title("Hybrid RAG")
+st.sidebar.title("Upload Knowledge Files")
+st.sidebar.write("Supported Formats:")
+st.sidebar.write("PDF | TXT | CSV | DOCX")
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "retriever" not in st.session_state:
+    st.session_state.retriever = None
+if "memory" not in st.session_state:
+    st.session_state.memory = ConversationBufferMemory(
+        memory_key="chat_history",
+        return_messages=True
+    )
 llm = ChatGroq(
     groq_api_key=st.secrets["GROQ_API_KEY"],
     model_name="llama-3.3-70b-versatile"
 )
 uploaded_files = st.sidebar.file_uploader(
-    "Upload PDF Files",
-    type="pdf",
+    "Upload Documents",
+    type=["pdf", "txt", "csv", "docx"],
     accept_multiple_files=True
 )
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "vectorstore" not in st.session_state:
-    st.session_state.vectorstore = None
-if uploaded_files:
+def load_document(file_path, file_type):
+    if file_type == "pdf":
+        loader = PyPDFLoader(file_path)
+    elif file_type == "txt":
+        loader = TextLoader(file_path)
+    elif file_type == "csv":
+        loader = CSVLoader(file_path)
+    elif file_type == "docx":
+        loader = Docx2txtLoader(file_path)
+    else:
+        return []
+    return loader.load()
+@st.cache_resource
+def process_documents(uploaded_files):
     all_docs = []
-    with st.spinner("Processing PDFs..."):
-        for uploaded_file in uploaded_files:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                tmp_file.write(uploaded_file.read())
-                temp_path = tmp_file.name
-            loader = PyPDFLoader(temp_path)
-            documents = loader.load()
-            for doc in documents:
-                doc.metadata["source"] = uploaded_file.name
-            all_docs.extend(documents)
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200
+    for uploaded_file in uploaded_files:
+        file_extension = uploaded_file.name.split(".")[-1]
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=f".{file_extension}"
+        ) as tmp_file:
+            tmp_file.write(uploaded_file.read())
+            temp_path = tmp_file.name
+        documents = load_document(
+            temp_path,
+            file_extension
         )
-
-        split_docs = text_splitter.split_documents(all_docs)
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
-        )
-        vectorstore = FAISS.from_documents(
-            split_docs,
-            embeddings
-        )
-        st.session_state.vectorstore = vectorstore
-    st.success("PDFs Uploaded & Processed Successfully!")
+        for doc in documents:
+            doc.metadata["source"] = uploaded_file.name
+        all_docs.extend(documents)
+        os.remove(temp_path)
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200
+    )
+    split_docs = text_splitter.split_documents(all_docs)
+    class CustomHFEmbeddings(Embeddings):
+        def __init__(self):
+            self.model = SentenceTransformer("all-MiniLM-L6-v2")
+        def embed_documents(self, texts):
+            return self.model.encode(texts).tolist()
+        def embed_query(self, text):
+            return self.model.encode(text).tolist()
+    embeddings = CustomHFEmbeddings()
+    vectorstore = FAISS.from_documents(split_docs, embeddings)
+    faiss_retriever = vectorstore.as_retriever(
+        search_kwargs={"k": 4}
+    )
+    bm25_retriever = BM25Retriever.from_documents(
+        split_docs
+    )
+    bm25_retriever.k = 4
+    ensemble_retriever = EnsembleRetriever(
+        retrievers=[
+            faiss_retriever,
+            bm25_retriever
+        ],
+        weights=[0.7, 0.3]
+    )
+    return ensemble_retriever
+if uploaded_files:
+    with st.spinner("Processing Documents..."):
+        retriever = process_documents(uploaded_files)
+        st.session_state.retriever = retriever
+    st.success("Documents Processed Successfully")
+if st.sidebar.button("Clear Chat"):
+    st.session_state.messages = []
+    st.session_state.memory.clear()
+    st.rerun()
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 user_question = st.chat_input(
-    "Ask questions from uploaded PDFs..."
+    "Ask questions from your uploaded documents..."
 )
 if user_question:
     st.session_state.messages.append({
@@ -66,29 +117,29 @@ if user_question:
     with st.chat_message("user"):
         st.markdown(user_question)
     with st.chat_message("assistant"):
-        if st.session_state.vectorstore is None:
-            st.warning("Please upload PDF files first.")
+        if st.session_state.retriever is None:
+            st.warning("Please upload documents first.")
         else:
             with st.spinner("Thinking..."):
-                retriever = st.session_state.vectorstore.as_retriever(
-                    search_kwargs={"k": 5}
+                docs = st.session_state.retriever.invoke(
+                    user_question
                 )
-
-                docs = retriever.invoke(user_question)
-                context = "\n\n".join(
-                    [doc.page_content for doc in docs]
-                )
-
+                context = "\n\n".join([
+                    doc.page_content
+                    for doc in docs
+                ])
                 prompt_template = """
-You are an AI Personal Learning Assistant.
-Answer the user's question ONLY from the provided context.
-If the answer exists in the PDFs:
-- Explain clearly
-- Give detailed answer
+You are an AI Knowledge Search Assistant.
+Answer ONLY from the provided context.
+Rules:
+- Give clear explanations
+- Give detailed answers
 - Mention important points
-- Include source PDF name and page number
-If the answer is not available, say:
-"I could not find this information in the uploaded PDFs."
+- Include source references
+- If answer is unavailable, say:
+"I could not find this information in the uploaded documents."
+Chat History:
+{chat_history}
 Context:
 {context}
 Question:
@@ -97,21 +148,45 @@ Answer:
 """
                 prompt = PromptTemplate(
                     template=prompt_template,
-                    input_variables=["context", "question"]
+                    input_variables=[
+                        "chat_history",
+                        "context",
+                        "question"
+                    ]
                 )
                 final_prompt = prompt.format(
+                   chat_history=str(st.session_state.memory.buffer),
                     context=context,
                     question=user_question
                 )
                 response = llm.invoke(final_prompt)
                 answer = response.content
-                st.markdown(answer)
-                st.markdown("Sources")
+                st.session_state.memory.save_context(
+                    {"input": user_question},
+                    {"output": answer}
+                )
+                confidence = len(docs)
+                st.markdown("### Confidence Score")
+                if confidence >= 5:
+                    st.success("High Confidence Answer")
+                elif confidence >= 3:
+                    st.warning("Medium Confidence Answer")
+                else:
+                    st.error("Low Confidence Answer")
+                st.markdown("### Sources")
                 shown_sources = set()
                 for doc in docs:
-                    source = doc.metadata.get("source", "Unknown File")
-                    page = doc.metadata.get("page", "Unknown Page")
-                    source_text = f"📄 {source} — Page {page + 1}"
+                    source = doc.metadata.get(
+                        "source",
+                        "Unknown File"
+                    )
+                    page = doc.metadata.get(
+                        "page",
+                        "N/A"
+                    )
+                    if isinstance(page, int):
+                        page = page + 1
+                    source_text = f"{source} — Page {page}"
                     if source_text not in shown_sources:
                         st.markdown(f"- {source_text}")
                         shown_sources.add(source_text)
