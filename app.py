@@ -66,8 +66,8 @@ def process_documents(uploaded_files):
         all_docs.extend(documents)
         os.remove(temp_path)
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1500,
-        chunk_overlap=300
+        chunk_size=800,
+        chunk_overlap=150
     )
     split_docs = text_splitter.split_documents(all_docs)
     class CustomHFEmbeddings(Embeddings):
@@ -107,26 +107,89 @@ user_question = st.chat_input(
     "Ask questions from your uploaded documents..."
 )
 if user_question:
-    prompt_template = """
-You are a helpful AI assistant with two abilities:
+
+    st.session_state.messages.append({
+        "role": "user",
+        "content": user_question
+    })
+
+    with st.chat_message("user"):
+        st.markdown(user_question)
+
+    with st.chat_message("assistant"):
+
+        # Greeting messages
+        general_messages = [
+            "hi",
+            "hello",
+            "hey",
+            "how are you",
+            "good morning",
+            "good evening",
+            "thank you"
+        ]
+
+        # GENERAL CHAT MODE
+        if user_question.lower().strip() in general_messages:
+
+            response = llm.invoke(user_question)
+
+            answer = response.content
+
+            st.write(answer)
+
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer
+            })
+
+        # DOCUMENT QUESTION ANSWERING
+        else:
+
+            # Check if documents uploaded
+            if st.session_state.retriever is None:
+
+                st.warning("Please upload documents first.")
+
+            else:
+
+                with st.spinner("Thinking..."):
+
+                    docs = st.session_state.retriever.invoke(
+                        user_question
+                    )
+
+                # Build context
+                context = "\n\n".join([
+                    doc.page_content
+                    for doc in docs
+                ])
+
+                # Prompt
+                prompt_template = """
+You are a helpful AI assistant with two modes:
 
 1. GENERAL CHAT MODE:
-If the user is greeting (hello, hi, how are you) or asking casual questions,
-respond normally in a friendly and natural way. No need to use context.
+- Respond naturally for greetings and casual chat.
 
-2. DOCUMENT Q&A MODE:
-If the question is related to uploaded documents, answer ONLY using the provided context.
+2. DOCUMENT QUESTION-ANSWERING MODE:
+- Answer primarily using uploaded document context.
+CONVERSATION MEMORY RULES: 
+- Use previous chat history to understand follow-up questions. 
+- If the user asks something like: "and its types" "explain more" 
+"give examples" then understand the previous topic automatically. 
+- Maintain conversational continuity naturally.
 
-RULES FOR DOCUMENT MODE:
-- Give detailed explanations (not short answers)
-- Expand concepts clearly and step-by-step when needed
-- Add examples ONLY if supported by context
-- Do NOT use outside knowledge
-- Do NOT invent information
-- If the answer is not present in context, say:
-  "I could not find this information in the uploaded documents."
-
----
+RULES:
+IMPORTANT RULES: - Prioritize uploaded document information 
+- Give detailed and beginner-friendly explanations 
+- Explain concepts clearly and step-by-step 
+- If information exists in documents, answer ONLY from documents
+- Do NOT invent document content 
+- If information is partially available, mention that clearly IF INFORMATION IS NOT PRESENT IN DOCUMENTS:
+- First say: "I could not find this information in the uploaded documents."
+- Then provide a general AI-based explanation separately
+- Clearly distinguish between document-based answers and general knowledge
 
 Context:
 {context}
@@ -139,62 +202,71 @@ Question:
 
 Answer:
 """
-    st.session_state.messages.append({
-        "role": "user",
-        "content": user_question
-    })
 
-    with st.chat_message("user"):
-        st.markdown(user_question)
-    with st.chat_message("assistant"):
-        if st.session_state.retriever is None:
-            st.warning("Please upload documents first.")
-        else:
-            with st.spinner("Thinking..."):
-                docs = st.session_state.retriever.invoke(user_question)
+                prompt = PromptTemplate(
+                    template=prompt_template,
+                    input_variables=[
+                        "chat_history",
+                        "context",
+                        "question"
+                    ]
+                )
 
-            context = "\n\n".join([doc.page_content for doc in docs])
+                final_prompt = prompt.format(
+                    chat_history=str(
+                        st.session_state.memory.buffer
+                    ),
+                    context=context,
+                    question=user_question
+                )
 
-            prompt = PromptTemplate(
-                template=prompt_template,
-                input_variables=["chat_history", "context", "question"]
-            )
+                # LLM response
+                response = llm.invoke(final_prompt)
 
-            final_prompt = prompt.format(
-                chat_history=str(st.session_state.memory.buffer),
-                context=context,
-                question=user_question
-            )
+                answer = response.content
 
-            response = llm.invoke(final_prompt)
-            answer = response.content
+                # Save memory
+                st.session_state.memory.save_context(
+                    {"input": user_question},
+                    {"output": answer}
+                )
 
-            # ✅ SAVE MEMORY
-            st.session_state.memory.save_context(
-                {"input": user_question},
-                {"output": answer}
-            )
+                # Show answer
+                st.markdown("### Answer")
+                st.write(answer)
 
-            # ⭐⭐⭐ THIS IS THE MISSING PART (IMPORTANT FIX)
-            st.markdown("### Answer")
-            st.write(answer)
+                # Show sources ONLY if answer grounded
+                if "I could not find this information" not in answer:
 
-            # Sources
-            st.markdown("### Sources")
-            shown_sources = set()
-            for doc in docs:
-                source = doc.metadata.get("source", "Unknown File")
-                page = doc.metadata.get("page", "N/A")
-                if isinstance(page, int):
-                    page = page + 1
+                    st.markdown("### Sources")
 
-                source_text = f"{source} — Page {page}"
-                if source_text not in shown_sources:
-                    st.markdown(f"- {source_text}")
-                    shown_sources.add(source_text)
+                    shown_sources = set()
 
-            # Save chat
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": answer
-            })
+                    for doc in docs:
+
+                        source = doc.metadata.get(
+                            "source",
+                            "Unknown File"
+                        )
+
+                        page = doc.metadata.get(
+                            "page",
+                            "N/A"
+                        )
+
+                        if isinstance(page, int):
+                            page = page + 1
+
+                        source_text = f"{source} — Page {page}"
+
+                        if source_text not in shown_sources:
+
+                            st.markdown(f"- {source_text}")
+
+                            shown_sources.add(source_text)
+
+                # Save assistant message
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": answer
+                })
