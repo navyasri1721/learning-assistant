@@ -27,7 +27,7 @@ if "memory" not in st.session_state:
     )
 llm = ChatGroq(
     groq_api_key=st.secrets["GROQ_API_KEY"],
-    model_name="llama-3.3-70b-versatile"
+    model_name="llama-3.1-8b-instant"
 )
 uploaded_files = st.sidebar.file_uploader(
     "Upload Documents",
@@ -66,8 +66,8 @@ def process_documents(uploaded_files):
         all_docs.extend(documents)
         os.remove(temp_path)
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=150
+        chunk_size=500,
+        chunk_overlap=100
     )
     split_docs = text_splitter.split_documents(all_docs)
     class CustomHFEmbeddings(Embeddings):
@@ -76,11 +76,14 @@ def process_documents(uploaded_files):
         def embed_documents(self, texts):
             return self.model.encode(texts).tolist()
         def embed_query(self, text):
-            return self.model.encode(text).tolist()
+            if text is None or not str(text).strip():
+                return [0.0] * 384
+
+            return self.model.encode(str(text)).tolist()
     embeddings = CustomHFEmbeddings()
     vectorstore = FAISS.from_documents(split_docs, embeddings)
     faiss_retriever = vectorstore.as_retriever(
-        search_kwargs={"k": 4}
+        search_kwargs={"k": 2}
     )
     bm25_retriever = BM25Retriever.from_documents(split_docs
     )
@@ -106,7 +109,10 @@ for message in st.session_state.messages:
 user_question = st.chat_input(
     "Ask questions from your uploaded documents..."
 )
-if user_question:
+if not user_question:
+
+    st.stop()
+if user_question and user_question.strip():
 
     st.session_state.messages.append({
         "role": "user",
@@ -128,8 +134,6 @@ if user_question:
             "good evening",
             "thank you"
         ]
-
-        # GENERAL CHAT MODE
         if user_question.lower().strip() in general_messages:
 
             response = llm.invoke(user_question)
@@ -155,41 +159,75 @@ if user_question:
 
                 with st.spinner("Thinking..."):
 
-                    docs = st.session_state.retriever.invoke(
-                        user_question
-                    )
+                    try:
+
+                        docs = st.session_state.retriever.invoke(
+                            user_question
+                        )
+
+                    except Exception as e:
+
+                        st.error(f"Retriever Error: {e}")
+
+                        st.stop()
+
+                # No docs found
+                if not docs:
+
+                    answer = "I could not find this information in the uploaded documents."
+
+                    st.write(answer)
+
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": answer
+                    })
+
+                    st.stop()
 
                 # Build context
                 context = "\n\n".join([
                     doc.page_content
                     for doc in docs
+                    if doc.page_content
                 ])
+
+                # Empty context protection
+                if len(context.strip()) < 50:
+
+                    answer = "I could not find this information in the uploaded documents."
+
+                    st.write(answer)
+
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": answer
+                    })
+
+                    st.stop()
 
                 # Prompt
                 prompt_template = """
-You are a helpful AI assistant with two modes:
+You are a helpful AI assistant for document question answering.
 
-1. GENERAL CHAT MODE:
-- Respond naturally for greetings and casual chat.
+CONVERSATION MEMORY RULES:
+- Use previous chat history to understand follow-up questions.
+- If the user asks:
+  "and its types"
+  "explain more"
+  "give examples"
+  then understand the previous topic automatically.
 
-2. DOCUMENT QUESTION-ANSWERING MODE:
-- Answer primarily using uploaded document context.
-CONVERSATION MEMORY RULES: 
-- Use previous chat history to understand follow-up questions. 
-- If the user asks something like: "and its types" "explain more" 
-"give examples" then understand the previous topic automatically. 
+IMPORTANT RULES:
+- Answer ONLY using the uploaded document context.
+- Do NOT use pretrained/general knowledge.
+- Do NOT invent information.
+- If the answer is not available in the context,
+  ONLY reply:
+  "I could not find this information in the uploaded documents."
+
+- Give beginner-friendly explanations.
 - Maintain conversational continuity naturally.
-
-RULES:
-IMPORTANT RULES: - Prioritize uploaded document information 
-- Give detailed and beginner-friendly explanations 
-- Explain concepts clearly and step-by-step 
-- If information exists in documents, answer ONLY from documents
-- Do NOT invent document content 
-- If information is partially available, mention that clearly IF INFORMATION IS NOT PRESENT IN DOCUMENTS:
-- First say: "I could not find this information in the uploaded documents."
-- Then provide a general AI-based explanation separately
-- Clearly distinguish between document-based answers and general knowledge
 
 Context:
 {context}
@@ -220,7 +258,7 @@ Answer:
                     question=user_question
                 )
 
-                # LLM response
+                # LLM Response
                 response = llm.invoke(final_prompt)
 
                 answer = response.content
@@ -235,7 +273,7 @@ Answer:
                 st.markdown("### Answer")
                 st.write(answer)
 
-                # Show sources ONLY if answer grounded
+                # Show sources
                 if "I could not find this information" not in answer:
 
                     st.markdown("### Sources")
