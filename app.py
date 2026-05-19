@@ -1,207 +1,208 @@
-import streamlit as st
-import tempfile
 import os
+import streamlit as st
+
 from langchain_groq import ChatGroq
-from langchain_community.document_loaders import (PyPDFLoader,TextLoader,CSVLoader,Docx2txtLoader)
-from langchain_text_splitters import (RecursiveCharacterTextSplitter)
-from langchain_community.vectorstores import Chroma
-from sentence_transformers import SentenceTransformer
-from langchain_core.embeddings import Embeddings
 from langchain_core.prompts import PromptTemplate
-from langchain_community.retrievers import ( BM25Retriever)
-from langchain_classic.memory import (ConversationBufferMemory)
-from langchain_classic.retrievers import (EnsembleRetriever)
-st.set_page_config(page_title="Hybrid RAG System",layout="wide")
-st.title("Hybrid RAG")
-st.sidebar.title("Upload document Files")
-st.sidebar.write("Supported Formats:")
-st.sidebar.write("PDF | TXT | CSV | DOCX")
+
+from src.config import (
+    MODEL_NAME,
+    PERSIST_DIRECTORY
+)
+
+from src.embeddings.huggingface_embeddings import (
+    CustomHFEmbeddings
+)
+
+from src.loaders.document_loader import (
+    process_uploaded_files
+)
+
+from src.vectorstore.chroma_store import (
+    create_chroma_vectorstore,
+    load_chroma_vectorstore,
+    get_chroma_retriever
+)
+
+from src.retrievers.hybrid_retriever import (
+    create_hybrid_retriever
+)
+
+from src.memory.chat_memory import (
+    get_memory
+)
+
+from src.prompts.rag_prompt import (
+    RAG_PROMPT
+)
+
+from src.utils.helpers import (
+    split_documents
+)
+
+# ---------------------------------------------------
+# STREAMLIT PAGE
+# ---------------------------------------------------
+
+st.set_page_config(
+    page_title="Hybrid RAG System",
+    layout="wide"
+)
+
+st.title("Hybrid RAG System")
+
+# ---------------------------------------------------
+# SESSION STATE
+# ---------------------------------------------------
+
 if "messages" not in st.session_state:
+
     st.session_state.messages = []
+
 if "retriever" not in st.session_state:
+
     st.session_state.retriever = None
+
 if "memory" not in st.session_state:
-    st.session_state.memory = (
-        ConversationBufferMemory(
-            memory_key="chat_history",
-            return_messages=True))
+
+    st.session_state.memory = get_memory()
+
+if "processed_files" not in st.session_state:
+
+    st.session_state.processed_files = []
+
+# ---------------------------------------------------
+# LLM
+# ---------------------------------------------------
+
 llm = ChatGroq(
     groq_api_key=st.secrets["GROQ_API_KEY"],
-    model_name="llama-3.1-8b-instant"
+    model_name=MODEL_NAME
 )
-class CustomHFEmbeddings(Embeddings):
-    def __init__(self):
-        self.model = SentenceTransformer(
-            "all-MiniLM-L6-v2"
-        )
-    def embed_documents(self, texts):
-        return self.model.encode(
-            texts
-        ).tolist()
-    def embed_query(self, text):
-        if text is None or not str(text).strip():
-            return [0.0] * 384
-        return self.model.encode(
-            str(text)
-        ).tolist()
+
+# ---------------------------------------------------
+# EMBEDDINGS
+# ---------------------------------------------------
+
 embeddings = CustomHFEmbeddings()
-PERSIST_DIRECTORY = "chroma_db"
+
+# ---------------------------------------------------
+# LOAD EXISTING CHROMADB
+# ---------------------------------------------------
+
 if (
     os.path.exists(PERSIST_DIRECTORY)
     and st.session_state.retriever is None
 ):
+
     try:
-        vectorstore = Chroma(
-            persist_directory=PERSIST_DIRECTORY,
-            embedding_function=embeddings
+
+        vectorstore = load_chroma_vectorstore(
+            embeddings
         )
-        chroma_retriever = (
-            vectorstore.as_retriever(
-                search_kwargs={"k": 2}
-            )
+
+        retriever = get_chroma_retriever(
+            vectorstore
         )
-        st.session_state.retriever = (
-            chroma_retriever
-        )
+
+        st.session_state.retriever = retriever
+
         st.sidebar.success(
             "Persistent ChromaDB Loaded"
         )
+
     except Exception as e:
 
         st.sidebar.error(
             f"Error loading ChromaDB: {e}"
         )
 
+# ---------------------------------------------------
+# SIDEBAR
+# ---------------------------------------------------
+
+st.sidebar.title("Upload Documents")
+
+st.sidebar.write(
+    "Supported Formats:"
+)
+
+st.sidebar.write(
+    "PDF | TXT | CSV | DOCX"
+)
 
 uploaded_files = st.sidebar.file_uploader(
-    "Upload Documents",
+    "Upload Files",
     type=["pdf", "txt", "csv", "docx"],
     accept_multiple_files=True
 )
 
-def load_document(file_path, file_type):
-
-    if file_type == "pdf":
-
-        loader = PyPDFLoader(file_path)
-
-    elif file_type == "txt":
-
-        loader = TextLoader(file_path)
-
-    elif file_type == "csv":
-
-        loader = CSVLoader(file_path)
-
-    elif file_type == "docx":
-
-        loader = Docx2txtLoader(file_path)
-
-    else:
-
-        return []
-
-    return loader.load()
-
-
-@st.cache_resource
-def process_documents(uploaded_files):
-
-    all_docs = []
-
-    for uploaded_file in uploaded_files:
-
-        file_extension = (
-            uploaded_file.name.split(".")[-1]
-        )
-
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=f".{file_extension}"
-        ) as tmp_file:
-
-            tmp_file.write(
-                uploaded_file.read()
-            )
-
-            temp_path = tmp_file.name
-
-        documents = load_document(
-            temp_path,
-            file_extension
-        )
-
-        for doc in documents:
-
-            doc.metadata["source"] = (
-                uploaded_file.name
-            )
-
-        all_docs.extend(documents)
-
-        os.remove(temp_path)
-    text_splitter = (
-        RecursiveCharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap=100
-        )
-    )
-
-    split_docs = text_splitter.split_documents(
-        all_docs
-    )
-
-
-    vectorstore = Chroma.from_documents(
-        documents=split_docs,
-        embedding=embeddings,
-        persist_directory=PERSIST_DIRECTORY
-    )
-
-    chroma_retriever = (
-        vectorstore.as_retriever(
-            search_kwargs={"k": 2}
-        )
-    )
-
-
-    bm25_retriever = (
-        BM25Retriever.from_documents(
-            split_docs
-        )
-    )
-
-    bm25_retriever.k = 4
-
-    ensemble_retriever = (
-        EnsembleRetriever(
-            retrievers=[
-                chroma_retriever,
-                bm25_retriever
-            ],
-            weights=[0.7, 0.3]
-        )
-    )
-
-    return ensemble_retriever
+# ---------------------------------------------------
+# PROCESS DOCUMENTS ONLY ONCE
+# ---------------------------------------------------
 
 if uploaded_files:
 
-    with st.spinner(
-        "Processing Documents..."
+    uploaded_file_names = sorted([
+        file.name
+        for file in uploaded_files
+    ])
+
+    # Process only new uploads
+    if (
+        uploaded_file_names
+        != st.session_state.processed_files
     ):
 
-        retriever = process_documents(
-            uploaded_files
+        with st.spinner(
+            "Processing documents..."
+        ):
+
+            # Load docs
+            docs = process_uploaded_files(
+                uploaded_files
+            )
+
+            # Split docs
+            split_docs = split_documents(
+                docs
+            )
+
+            # Create / update vector DB
+            vectorstore = create_chroma_vectorstore(
+                split_docs,
+                embeddings
+            )
+
+            # Chroma retriever
+            chroma_retriever = (
+                get_chroma_retriever(
+                    vectorstore
+                )
+            )
+
+            # Hybrid retriever
+            retriever = create_hybrid_retriever(
+                split_docs,
+                chroma_retriever
+            )
+
+            # Save retriever
+            st.session_state.retriever = (
+                retriever
+            )
+
+            # Save processed files
+            st.session_state.processed_files = (
+                uploaded_file_names
+            )
+
+        st.success(
+            "Documents Processed Successfully"
         )
 
-        st.session_state.retriever = (
-            retriever
-        )
-
-    st.success(
-        "Documents Processed Successfully"
-    )
+# ---------------------------------------------------
+# CLEAR CHAT
+# ---------------------------------------------------
 
 if st.sidebar.button("Clear Chat"):
 
@@ -210,6 +211,10 @@ if st.sidebar.button("Clear Chat"):
     st.session_state.memory.clear()
 
     st.rerun()
+
+# ---------------------------------------------------
+# DISPLAY CHAT HISTORY
+# ---------------------------------------------------
 
 for message in st.session_state.messages:
 
@@ -221,196 +226,232 @@ for message in st.session_state.messages:
             message["content"]
         )
 
+# ---------------------------------------------------
+# CHAT INPUT
+# ---------------------------------------------------
+
 user_question = st.chat_input(
     "Ask questions from your uploaded documents..."
 )
 
-if not user_question:
+# ---------------------------------------------------
+# QUESTION PROCESSING
+# ---------------------------------------------------
 
-    st.stop()
+if user_question:
 
-if user_question.strip():
-
+    # Save user message
     st.session_state.messages.append({
         "role": "user",
         "content": user_question
     })
 
+    # Show user message
     with st.chat_message("user"):
 
         st.markdown(user_question)
 
+    # Assistant response
     with st.chat_message("assistant"):
 
-        general_messages = [
-            "hi",
-            "hello",
-            "hey",
-            "how are you",
-            "good morning",
-            "good evening",
-            "thank you"
-        ]
+        # No retriever
+        if st.session_state.retriever is None:
 
-        if (
-            user_question.lower().strip()
-            in general_messages
-        ):
+            st.warning(
+                "Please upload documents first."
+            )
+
+        else:
+
+            try:
+
+                docs = (
+                    st.session_state.retriever.invoke(
+                        user_question
+                    )
+                )
+
+            except Exception as e:
+
+                st.error(
+                    f"Retriever Error: {e}"
+                )
+
+                st.stop()
+
+            # ---------------------------------------------------
+            # NO DOCUMENTS FOUND
+            # ---------------------------------------------------
+
+            if not docs:
+
+                answer = (
+                    "I could not find this "
+                    "information in the "
+                    "uploaded documents."
+                )
+
+                st.markdown(answer)
+
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": answer
+                })
+
+                st.stop()
+
+            # ---------------------------------------------------
+            # BUILD CONTEXT
+            # ---------------------------------------------------
+
+            context = "\n\n".join([
+
+                doc.page_content[:800]
+
+                for doc in docs
+
+                if doc.page_content
+            ])
+
+            # ---------------------------------------------------
+            # LOW QUALITY CONTEXT
+            # ---------------------------------------------------
+
+            if len(context.strip()) < 50:
+
+                answer = (
+                    "I could not find this "
+                    "information in the "
+                    "uploaded documents."
+                )
+
+                st.markdown(answer)
+
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": answer
+                })
+
+                st.stop()
+
+            # ---------------------------------------------------
+            # PROMPT
+            # ---------------------------------------------------
+
+            prompt = PromptTemplate(
+                template=RAG_PROMPT,
+                input_variables=[
+                    "chat_history",
+                    "context",
+                    "question"
+                ]
+            )
+
+            final_prompt = prompt.format(
+                chat_history=str(
+                    st.session_state.memory.buffer
+                ),
+                context=context,
+                question=user_question
+            )
+
+            # ---------------------------------------------------
+            # LLM RESPONSE
+            # ---------------------------------------------------
 
             response = llm.invoke(
-                user_question
+                final_prompt
             )
 
             answer = response.content
 
-            st.write(answer)
+            # ---------------------------------------------------
+            # SAVE MEMORY
+            # ---------------------------------------------------
+
+            st.session_state.memory.save_context(
+                {"input": user_question},
+                {"output": answer}
+            )
+
+            # ---------------------------------------------------
+            # SHOW ANSWER
+            # ---------------------------------------------------
+
+            st.markdown(answer)
+
+            # ---------------------------------------------------
+            # SAVE CHAT
+            # ---------------------------------------------------
 
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": answer
             })
 
+            # ---------------------------------------------------
+            # FALLBACK MESSAGE
+            # ---------------------------------------------------
 
-        else:
+            fallback_message = (
+                "I could not find this "
+                "information in the "
+                "uploaded documents."
+            )
+
+            # ---------------------------------------------------
+            # SHOW SOURCES ONLY FOR VALID ANSWERS
+            # ---------------------------------------------------
 
             if (
-                st.session_state.retriever
-                is None
+                answer.strip()
+                != fallback_message
             ):
 
-                st.warning(
-                    "Please upload documents first."
-                )
+                if (
+                    docs
+                    and len(context.strip()) > 50
+                ):
 
-            else:
-
-                try:
-
-                    docs = (
-                        st.session_state.retriever.invoke(
-                            user_question
-                        )
+                    st.markdown(
+                        "### Sources"
                     )
 
-                except Exception as e:
-
-                    st.error(
-                        f"Retriever Error: {e}"
-                    )
-
-                    st.stop()
-
-                if not docs:
-
-                    answer = (
-                        "I could not find this "
-                        "information in the "
-                        "uploaded documents."
-                    )
-
-                    st.write(answer)
-
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": answer
-                    })
-
-                    st.stop()
-                context = "\n\n".join([
-
-                    doc.page_content
-
-                    for doc in docs
-
-                    if doc.page_content
-                ])
-                if len(context.strip()) < 50:
-
-                    answer = (
-                        "I could not find this "
-                        "information in the "
-                        "uploaded documents."
-                    )
-                    st.write(answer)
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": answer
-                    })
-                    st.stop()
-                prompt_template = """
-You are a helpful AI assistant for document question answering.
-
-CONVERSATION MEMORY RULES:
-- Use previous chat history to understand follow-up questions.
-- If the user asks:
-  "and its types"
-  "explain more"
-  "give examples"
-  then understand the previous topic automatically.
-
-IMPORTANT RULES:
-- Answer ONLY using the uploaded document context.
-- Do NOT use pretrained/general knowledge.
-- Do NOT invent information.
-- If the answer is not available in the context,
-  ONLY reply:
-  "I could not find this information in the uploaded documents."
-
-- Give beginner-friendly explanations.
-- Maintain conversational continuity naturally.
-
-Context:
-{context}
-
-Chat History:
-{chat_history}
-
-Question:
-{question}
-
-Answer:
-"""
-
-                prompt = PromptTemplate(
-                    template=prompt_template,
-                    input_variables=[
-                        "chat_history",
-                        "context",
-                        "question"
-                    ]
-                )
-                final_prompt = prompt.format(
-                    chat_history=str(
-                        st.session_state.memory.buffer
-                    ),
-                    context=context,
-                    question=user_question)
-                response = llm.invoke(
-                    final_prompt)
-                answer = response.content
-                st.session_state.memory.save_context(
-                    {"input": user_question},
-                    {"output": answer})
-                st.markdown("### Answer")
-                st.write(answer)
-                if ("I could not find this information" not in answer ):
-                    st.markdown("### Sources")
                     shown_sources = set()
-                    for doc in docs:
+
+                    # Show only top relevant docs
+                    top_docs = docs[:2]
+
+                    for doc in top_docs:
+
                         source = doc.metadata.get(
                             "source",
-                            "Unknown File")
+                            "Unknown File"
+                        )
+
                         page = doc.metadata.get(
                             "page",
-                            "N/A")
+                            "N/A"
+                        )
+
                         if isinstance(page, int):
+
                             page = page + 1
-                        source_text = (f"{source} — Page {page}")
-                        if (source_text not in shown_sources):
+
+                        source_text = (
+                            f"{source} — "
+                            f"Page {page}"
+                        )
+
+                        if (
+                            source_text
+                            not in shown_sources
+                        ):
+
                             st.markdown(
-                                f"- {source_text}")
+                                f"- {source_text}"
+                            )
+
                             shown_sources.add(
-                                source_text)
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": answer})
+                                source_text
+                            )

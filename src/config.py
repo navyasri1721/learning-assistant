@@ -1,0 +1,9 @@
+PERSIST_DIRECTORY = "chroma_db"
+
+MODEL_NAME = "llama-3.1-8b-instant"
+
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 50
+
+CHROMA_K = 1
+BM25_K = 1
