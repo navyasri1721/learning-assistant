@@ -11,13 +11,11 @@ def create_chroma_vectorstore(
     embeddings
 ):
 
-    # Load existing DB
     vectorstore = Chroma(
         persist_directory=PERSIST_DIRECTORY,
         embedding_function=embeddings
     )
 
-    # Add only new documents
     vectorstore.add_documents(
         split_docs
     )
@@ -43,10 +41,9 @@ def get_chroma_retriever(
 
     return vectorstore.as_retriever(
 
-        search_type="similarity_score_threshold",
+        search_type="similarity",
 
         search_kwargs={
-            "k": CHROMA_K,
-            "score_threshold": 0.5
+            "k": CHROMA_K
         }
     )
