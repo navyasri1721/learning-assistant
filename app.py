@@ -1,39 +1,76 @@
 import os
 import streamlit as st
+
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
+
 from src.config import (
     MODEL_NAME,
     PERSIST_DIRECTORY
 )
+
 from src.embeddings.huggingface_embeddings import (
     CustomHFEmbeddings
 )
+
 from src.loaders.document_loader import (
     process_uploaded_files
 )
+
 from src.vectorstore.chroma_store import (
     create_chroma_vectorstore,
     load_chroma_vectorstore,
     get_chroma_retriever
 )
+
 from src.retrievers.hybrid_retriever import (
     create_hybrid_retriever
 )
+
 from src.memory.chat_memory import (
     get_memory
 )
+
 from src.prompts.rag_prompt import (
     RAG_PROMPT
 )
+
 from src.utils.helpers import (
     split_documents
 )
+
+# ---------------- QUERY REWRITE ----------------
+
+from src.query_rewrite.query_rewriter import (
+    rewrite_query
+)
+
+# ---------------- RERANK ----------------
+
+from src.reranker.reranker import (
+    rerank_documents
+)
+
+# ---------------- REFINE ----------------
+
+from src.refiner.context_refiner import (
+    refine_context
+)
+
+# ---------------------------------------------------
+# STREAMLIT PAGE
+# ---------------------------------------------------
+
 st.set_page_config(
     page_title="Hybrid RAG System",
     layout="wide"
 )
-st.title("Hybrid RAG system")
+
+st.title("Hybrid RAG System")
+
+# ---------------------------------------------------
+# SESSION STATE
+# ---------------------------------------------------
 
 if "messages" not in st.session_state:
 
@@ -51,40 +88,107 @@ if "processed_files" not in st.session_state:
 
     st.session_state.processed_files = []
 
+# ---------------------------------------------------
+# LLM
+# ---------------------------------------------------
+
 llm = ChatGroq(
     groq_api_key=st.secrets["GROQ_API_KEY"],
     model_name=MODEL_NAME
 )
 
+# ---------------------------------------------------
+# EMBEDDINGS
+# ---------------------------------------------------
+
 embeddings = CustomHFEmbeddings()
+
+# ---------------------------------------------------
+# LOAD EXISTING DATABASE
+# ---------------------------------------------------
+
 if (
     os.path.exists(PERSIST_DIRECTORY)
     and st.session_state.retriever is None
 ):
 
     try:
+
         vectorstore = load_chroma_vectorstore(
             embeddings
         )
-        retriever = get_chroma_retriever(
-            vectorstore
+
+        # LOAD ALL DOCUMENTS FROM CHROMA
+        all_docs = vectorstore.get()
+
+        documents = []
+
+        if all_docs and all_docs["documents"]:
+
+            from langchain_core.documents import (
+                Document
+            )
+
+            for i in range(
+                len(all_docs["documents"])
+            ):
+
+                doc = Document(
+
+                    page_content=all_docs[
+                        "documents"
+                    ][i],
+
+                    metadata=all_docs[
+                        "metadatas"
+                    ][i]
+                )
+
+                documents.append(doc)
+
+        # CHROMA RETRIEVER
+        chroma_retriever = (
+            get_chroma_retriever(
+                vectorstore
+            )
         )
-        st.session_state.retriever = retriever
+
+        # HYBRID RETRIEVER
+        retriever = create_hybrid_retriever(
+            documents,
+            chroma_retriever
+        )
+
+        st.session_state.retriever = (
+            retriever
+        )
+
         st.sidebar.success(
-            "Persistent ChromaDB Loaded"
+            "Persistent Database Loaded"
         )
+
     except Exception as e:
+
         st.sidebar.error(
-            f"Error loading ChromaDB: {e}"
+            f"Error loading DB: {e}"
         )
-st.sidebar.title("Upload documents")
+
+# ---------------------------------------------------
+# SIDEBAR
+# ---------------------------------------------------
+
+st.sidebar.title(
+    "Upload Documents"
+)
 
 st.sidebar.write(
     "Supported Formats:"
 )
+
 st.sidebar.write(
     "PDF | TXT | CSV | DOCX"
 )
+
 uploaded_files = st.sidebar.file_uploader(
     "Upload Files",
     type=["pdf", "txt", "csv", "docx"],
@@ -92,59 +196,92 @@ uploaded_files = st.sidebar.file_uploader(
 )
 
 # ---------------------------------------------------
-# PROCESS DOCUMENTS ONLY ONCE
+# PROCESS DOCUMENTS
 # ---------------------------------------------------
 
 if uploaded_files:
 
     uploaded_file_names = sorted([
+
         file.name
+
         for file in uploaded_files
     ])
+
     if (
         uploaded_file_names
         != st.session_state.processed_files
     ):
 
         with st.spinner(
-            "Processing documents"
+            "Processing documents..."
         ):
 
-            # Load docs
+            # LOAD DOCUMENTS
             docs = process_uploaded_files(
                 uploaded_files
             )
 
-            # Split docs
+            # SPLIT DOCUMENTS
             split_docs = split_documents(
                 docs
             )
 
-            # Create / update vector DB
-            vectorstore = create_chroma_vectorstore(
-                split_docs,
-                embeddings
+            # SAVE TO CHROMA
+            vectorstore = (
+                create_chroma_vectorstore(
+                    split_docs,
+                    embeddings
+                )
             )
 
-            # Chroma retriever
+            # LOAD ALL DOCS AGAIN
+            all_docs = vectorstore.get()
+
+            documents = []
+
+            if all_docs and all_docs["documents"]:
+
+                from langchain_core.documents import (
+                    Document
+                )
+
+                for i in range(
+                    len(all_docs["documents"])
+                ):
+
+                    doc = Document(
+
+                        page_content=all_docs[
+                            "documents"
+                        ][i],
+
+                        metadata=all_docs[
+                            "metadatas"
+                        ][i]
+                    )
+
+                    documents.append(doc)
+
+            # CHROMA RETRIEVER
             chroma_retriever = (
                 get_chroma_retriever(
                     vectorstore
                 )
             )
 
-            # Hybrid retriever
-            retriever = create_hybrid_retriever(
-                split_docs,
-                chroma_retriever
+            # HYBRID RETRIEVER
+            retriever = (
+                create_hybrid_retriever(
+                    documents,
+                    chroma_retriever
+                )
             )
 
-            # Save retriever
             st.session_state.retriever = (
                 retriever
             )
 
-            # Save processed files
             st.session_state.processed_files = (
                 uploaded_file_names
             )
@@ -157,7 +294,9 @@ if uploaded_files:
 # CLEAR CHAT
 # ---------------------------------------------------
 
-if st.sidebar.button("Clear Chat"):
+if st.sidebar.button(
+    "Clear Chat"
+):
 
     st.session_state.messages = []
 
@@ -193,22 +332,27 @@ user_question = st.chat_input(
 
 if user_question:
 
-    # Save user message
     st.session_state.messages.append({
+
         "role": "user",
+
         "content": user_question
     })
 
-    # Show user message
     with st.chat_message("user"):
 
-        st.markdown(user_question)
+        st.markdown(
+            user_question
+        )
 
-    # Assistant response
-    with st.chat_message("assistant"):
+    with st.chat_message(
+        "assistant"
+    ):
 
-        # No retriever
-        if st.session_state.retriever is None:
+        if (
+            st.session_state.retriever
+            is None
+        ):
 
             st.warning(
                 "Please upload documents first."
@@ -218,56 +362,55 @@ if user_question:
 
             try:
 
+                # ---------------------------------------------------
+                # 1. QUERY REWRITE
+                # ---------------------------------------------------
+
+                rewritten_question = (
+                    rewrite_query(
+                        question=user_question,
+                        memory=st.session_state.memory,
+                        llm=llm
+                    )
+                )
+
+                # ---------------------------------------------------
+                # 2. RETRIEVE
+                # ---------------------------------------------------
+
                 docs = (
                     st.session_state.retriever.invoke(
-                        user_question
+                        rewritten_question
                     )
+                )
+
+                # ---------------------------------------------------
+                # 3. RERANK
+                # ---------------------------------------------------
+
+                docs = rerank_documents(
+                    rewritten_question,
+                    docs
+                )
+
+                # ---------------------------------------------------
+                # 4. REFINE
+                # ---------------------------------------------------
+
+                context = refine_context(
+                    docs
                 )
 
             except Exception as e:
 
                 st.error(
-                    f"Retriever Error: {e}"
+                    f"Pipeline Error: {e}"
                 )
 
                 st.stop()
 
             # ---------------------------------------------------
-            # NO DOCUMENTS FOUND
-            # ---------------------------------------------------
-
-            if not docs:
-
-                answer = (
-                    "I could not find this "
-                    "information in the "
-                    "uploaded documents."
-                )
-
-                st.markdown(answer)
-
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": answer
-                })
-
-                st.stop()
-
-            # ---------------------------------------------------
-            # BUILD CONTEXT
-            # ---------------------------------------------------
-
-            context = "\n\n".join([
-
-                doc.page_content[:800]
-
-                for doc in docs
-
-                if doc.page_content
-            ])
-
-            # ---------------------------------------------------
-            # LOW QUALITY CONTEXT
+            # EMPTY CONTEXT
             # ---------------------------------------------------
 
             if len(context.strip()) < 50:
@@ -281,18 +424,22 @@ if user_question:
                 st.markdown(answer)
 
                 st.session_state.messages.append({
+
                     "role": "assistant",
+
                     "content": answer
                 })
 
                 st.stop()
 
             # ---------------------------------------------------
-            # PROMPT
+            # 5. INSERT
             # ---------------------------------------------------
 
             prompt = PromptTemplate(
+
                 template=RAG_PROMPT,
+
                 input_variables=[
                     "chat_history",
                     "context",
@@ -301,15 +448,18 @@ if user_question:
             )
 
             final_prompt = prompt.format(
+
                 chat_history=str(
                     st.session_state.memory.buffer
                 ),
+
                 context=context,
-                question=user_question
+
+                question=rewritten_question
             )
 
             # ---------------------------------------------------
-            # LLM RESPONSE
+            # 6. GENERATE
             # ---------------------------------------------------
 
             response = llm.invoke(
@@ -318,93 +468,63 @@ if user_question:
 
             answer = response.content
 
-            # ---------------------------------------------------
             # SAVE MEMORY
-            # ---------------------------------------------------
-
             st.session_state.memory.save_context(
+
                 {"input": user_question},
+
                 {"output": answer}
             )
 
-            # ---------------------------------------------------
             # SHOW ANSWER
-            # ---------------------------------------------------
-
             st.markdown(answer)
 
-            # ---------------------------------------------------
             # SAVE CHAT
-            # ---------------------------------------------------
-
             st.session_state.messages.append({
+
                 "role": "assistant",
+
                 "content": answer
             })
 
-            # ---------------------------------------------------
-            # FALLBACK MESSAGE
-            # ---------------------------------------------------
+            # SOURCES
+            if docs:
 
-            fallback_message = (
-                "I could not find this "
-                "information in the "
-                "uploaded documents."
-            )
+                st.markdown(
+                    "### Sources"
+                )
 
-            # ---------------------------------------------------
-            # SHOW SOURCES ONLY FOR VALID ANSWERS
-            # ---------------------------------------------------
+                shown_sources = set()
 
-            if (
-                answer.strip()
-                != fallback_message
-            ):
+                for doc in docs[:3]:
 
-                if (
-                    docs
-                    and len(context.strip()) > 50
-                ):
-
-                    st.markdown(
-                        "### Sources"
+                    source = doc.metadata.get(
+                        "source",
+                        "Unknown File"
                     )
 
-                    shown_sources = set()
+                    page = doc.metadata.get(
+                        "page",
+                        "N/A"
+                    )
 
-                    # Show only top relevant docs
-                    top_docs = docs[:2]
+                    if isinstance(page, int):
 
-                    for doc in top_docs:
+                        page = page + 1
 
-                        source = doc.metadata.get(
-                            "source",
-                            "Unknown File"
+                    source_text = (
+                        f"{source} — Page {page}"
+                    )
+
+                    if (
+                        source_text
+                        not in shown_sources
+                    ):
+
+                        st.markdown(
+                            f"- {source_text}"
                         )
 
-                        page = doc.metadata.get(
-                            "page",
-                            "N/A"
-                        )
-
-                        if isinstance(page, int):
-
-                            page = page + 1
-
-                        source_text = (
-                            f"{source} — "
-                            f"Page {page}"
-                        )
-
-                        if (
+                        shown_sources.add(
                             source_text
-                            not in shown_sources
-                        ):
-
-                            st.markdown(
-                                f"- {source_text}"
-                            )
-
-                            shown_sources.add(
-                                source_text
-                            )
+                        )
