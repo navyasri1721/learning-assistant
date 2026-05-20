@@ -1,58 +1,39 @@
 import os
 import streamlit as st
-
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
-
 from src.config import (
     MODEL_NAME,
     PERSIST_DIRECTORY
 )
-
 from src.embeddings.huggingface_embeddings import (
     CustomHFEmbeddings
 )
-
 from src.loaders.document_loader import (
     process_uploaded_files
 )
-
 from src.vectorstore.chroma_store import (
     create_chroma_vectorstore,
     load_chroma_vectorstore,
     get_chroma_retriever
 )
-
 from src.retrievers.hybrid_retriever import (
     create_hybrid_retriever
 )
-
 from src.memory.chat_memory import (
     get_memory
 )
-
 from src.prompts.rag_prompt import (
     RAG_PROMPT
 )
-
 from src.utils.helpers import (
     split_documents
 )
-
-# ---------------------------------------------------
-# STREAMLIT PAGE
-# ---------------------------------------------------
-
 st.set_page_config(
     page_title="Hybrid RAG System",
     layout="wide"
 )
-
-st.title("Hybrid RAG System")
-
-# ---------------------------------------------------
-# SESSION STATE
-# ---------------------------------------------------
+st.title("Hybrid RAG system")
 
 if "messages" not in st.session_state:
 
@@ -70,66 +51,40 @@ if "processed_files" not in st.session_state:
 
     st.session_state.processed_files = []
 
-# ---------------------------------------------------
-# LLM
-# ---------------------------------------------------
-
 llm = ChatGroq(
     groq_api_key=st.secrets["GROQ_API_KEY"],
     model_name=MODEL_NAME
 )
 
-# ---------------------------------------------------
-# EMBEDDINGS
-# ---------------------------------------------------
-
 embeddings = CustomHFEmbeddings()
-
-# ---------------------------------------------------
-# LOAD EXISTING CHROMADB
-# ---------------------------------------------------
-
 if (
     os.path.exists(PERSIST_DIRECTORY)
     and st.session_state.retriever is None
 ):
 
     try:
-
         vectorstore = load_chroma_vectorstore(
             embeddings
         )
-
         retriever = get_chroma_retriever(
             vectorstore
         )
-
         st.session_state.retriever = retriever
-
         st.sidebar.success(
             "Persistent ChromaDB Loaded"
         )
-
     except Exception as e:
-
         st.sidebar.error(
             f"Error loading ChromaDB: {e}"
         )
-
-# ---------------------------------------------------
-# SIDEBAR
-# ---------------------------------------------------
-
-st.sidebar.title("Upload Documents")
+st.sidebar.title("Upload documents")
 
 st.sidebar.write(
     "Supported Formats:"
 )
-
 st.sidebar.write(
     "PDF | TXT | CSV | DOCX"
 )
-
 uploaded_files = st.sidebar.file_uploader(
     "Upload Files",
     type=["pdf", "txt", "csv", "docx"],
