@@ -101,15 +101,13 @@ if uploaded_files:
         file.name
         for file in uploaded_files
     ])
-
-    # Process only new uploads
     if (
         uploaded_file_names
         != st.session_state.processed_files
     ):
 
         with st.spinner(
-            "Processing documents..."
+            "Processing documents"
         ):
 
             # Load docs
