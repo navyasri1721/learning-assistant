@@ -57,6 +57,13 @@ from src.refiner.context_refiner import (
     refine_context
 )
 
+# ---------------- MYSQL ----------------
+
+from src.database.mysql_connection import (
+    save_rag_data,
+    fetch_rag_data
+)
+
 # ---------------------------------------------------
 # STREAMLIT PAGE
 # ---------------------------------------------------
@@ -67,6 +74,12 @@ st.set_page_config(
 )
 
 st.title("Hybrid RAG System")
+
+# ---------------------------------------------------
+# FETCH MYSQL DATA
+# ---------------------------------------------------
+
+fetch_rag_data()
 
 # ---------------------------------------------------
 # SESSION STATE
@@ -118,7 +131,7 @@ if (
             embeddings
         )
 
-        # LOAD ALL DOCUMENTS FROM CHROMA
+        # LOAD ALL DOCUMENTS
         all_docs = vectorstore.get()
 
         documents = []
@@ -468,6 +481,15 @@ if user_question:
 
             answer = response.content
 
+            # ---------------------------------------------------
+            # SAVE TO MYSQL
+            # ---------------------------------------------------
+
+            save_rag_data(
+                user_question,
+                answer
+            )
+
             # SAVE MEMORY
             st.session_state.memory.save_context(
 
@@ -487,7 +509,10 @@ if user_question:
                 "content": answer
             })
 
+            # ---------------------------------------------------
             # SOURCES
+            # ---------------------------------------------------
+
             if docs:
 
                 st.markdown(
