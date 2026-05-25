@@ -38,6 +38,21 @@ from src.prompts.rag_prompt import (
 from src.utils.helpers import (
     split_documents
 )
+from src.pipeline.query_rewrite_handler import (
+    QueryRewriteHandler
+)
+
+from src.pipeline.retrieval_handler import (
+    RetrievalHandler
+)
+
+from src.pipeline.rerank_handler import (
+    RerankHandler
+)
+
+from src.pipeline.generation_handler import (
+    GenerationHandler
+)
 
 # ---------------- QUERY REWRITE ----------------
 
@@ -105,16 +120,25 @@ if "processed_files" not in st.session_state:
 # LLM
 # ---------------------------------------------------
 
-llm = ChatGroq(
-    groq_api_key=st.secrets["GROQ_API_KEY"],
-    model_name=MODEL_NAME
+from src.factories.llm_factory import (
+    LLMFactory
+)
+
+llm = LLMFactory.create_llm(
+    st.secrets["GROQ_API_KEY"]
 )
 
 # ---------------------------------------------------
 # EMBEDDINGS
 # ---------------------------------------------------
 
-embeddings = CustomHFEmbeddings()
+from src.singleton.embedding_singleton import (
+    EmbeddingSingleton
+)
+
+embeddings = (
+    EmbeddingSingleton.get_instance()
+)
 
 # ---------------------------------------------------
 # LOAD EXISTING DATABASE
@@ -342,7 +366,6 @@ user_question = st.chat_input(
 # ---------------------------------------------------
 # QUESTION PROCESSING
 # ---------------------------------------------------
-
 if user_question:
 
     st.session_state.messages.append({
@@ -354,18 +377,11 @@ if user_question:
 
     with st.chat_message("user"):
 
-        st.markdown(
-            user_question
-        )
+        st.markdown(user_question)
 
-    with st.chat_message(
-        "assistant"
-    ):
+    with st.chat_message("assistant"):
 
-        if (
-            st.session_state.retriever
-            is None
-        ):
+        if st.session_state.retriever is None:
 
             st.warning(
                 "Please upload documents first."
@@ -376,43 +392,65 @@ if user_question:
             try:
 
                 # ---------------------------------------------------
-                # 1. QUERY REWRITE
+                # CREATE HANDLERS
                 # ---------------------------------------------------
 
-                rewritten_question = (
-                    rewrite_query(
-                        question=user_question,
-                        memory=st.session_state.memory,
-                        llm=llm
+                rewrite_handler = (
+                    QueryRewriteHandler(
+                        llm,
+                        st.session_state.memory
+                    )
+                )
+
+                retrieval_handler = (
+                    RetrievalHandler(
+                        st.session_state.retriever
+                    )
+                )
+
+                rerank_handler = (
+                    RerankHandler()
+                )
+
+                generation_handler = (
+                    GenerationHandler(
+                        llm,
+                        st.session_state.memory
                     )
                 )
 
                 # ---------------------------------------------------
-                # 2. RETRIEVE
+                # CONNECT HANDLERS
                 # ---------------------------------------------------
 
-                docs = (
-                    st.session_state.retriever.invoke(
-                        rewritten_question
-                    )
+                rewrite_handler.set_next(
+                    retrieval_handler
+                ).set_next(
+                    rerank_handler
+                ).set_next(
+                    generation_handler
                 )
 
                 # ---------------------------------------------------
-                # 3. RERANK
+                # RUN PIPELINE
                 # ---------------------------------------------------
 
-                docs = rerank_documents(
-                    rewritten_question,
-                    docs
+                data = {
+
+                    "question": user_question
+                }
+
+                result = rewrite_handler.handle(
+                    data
                 )
 
                 # ---------------------------------------------------
-                # 4. REFINE
+                # GET FINAL DATA
                 # ---------------------------------------------------
 
-                context = refine_context(
-                    docs
-                )
+                answer = result["answer"]
+
+                docs = result["docs"]
 
             except Exception as e:
 
@@ -426,7 +464,7 @@ if user_question:
             # EMPTY CONTEXT
             # ---------------------------------------------------
 
-            if len(context.strip()) < 50:
+            if not docs:
 
                 answer = (
                     "I could not find this "
@@ -446,42 +484,6 @@ if user_question:
                 st.stop()
 
             # ---------------------------------------------------
-            # 5. INSERT
-            # ---------------------------------------------------
-
-            prompt = PromptTemplate(
-
-                template=RAG_PROMPT,
-
-                input_variables=[
-                    "chat_history",
-                    "context",
-                    "question"
-                ]
-            )
-
-            final_prompt = prompt.format(
-
-                chat_history=str(
-                    st.session_state.memory.buffer
-                ),
-
-                context=context,
-
-                question=rewritten_question
-            )
-
-            # ---------------------------------------------------
-            # 6. GENERATE
-            # ---------------------------------------------------
-
-            response = llm.invoke(
-                final_prompt
-            )
-
-            answer = response.content
-
-            # ---------------------------------------------------
             # SAVE TO MYSQL
             # ---------------------------------------------------
 
@@ -490,7 +492,10 @@ if user_question:
                 answer
             )
 
+            # ---------------------------------------------------
             # SAVE MEMORY
+            # ---------------------------------------------------
+
             st.session_state.memory.save_context(
 
                 {"input": user_question},
@@ -498,10 +503,16 @@ if user_question:
                 {"output": answer}
             )
 
+            # ---------------------------------------------------
             # SHOW ANSWER
+            # ---------------------------------------------------
+
             st.markdown(answer)
 
+            # ---------------------------------------------------
             # SAVE CHAT
+            # ---------------------------------------------------
+
             st.session_state.messages.append({
 
                 "role": "assistant",
@@ -515,9 +526,7 @@ if user_question:
 
             if docs:
 
-                st.markdown(
-                    "### Sources"
-                )
+                st.markdown("### Sources")
 
                 shown_sources = set()
 
